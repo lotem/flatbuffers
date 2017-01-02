@@ -105,6 +105,22 @@ inline Table *GetFieldT(const Table &table,
   return table.GetPointer<Table *>(field.offset());
 }
 
+// Get a field, if you know it's a struct.
+inline const Struct *GetFieldStruct(const Table &table,
+                                    const reflection::Field &field) {
+  // TODO: This does NOT check if the field is a table or struct, but we'd need
+  // access to the schema to check the is_struct flag.
+  assert(field.type()->base_type() == reflection::Obj);
+  return table.GetStruct<const Struct *>(field.offset());
+}
+
+// Get a structure's field, if you know it's a struct.
+inline const Struct *GetFieldStruct(const Struct &structure,
+                                    const reflection::Field &field) {
+  assert(field.type()->base_type() == reflection::Obj);
+  return structure.GetStruct<const Struct *>(field.offset());
+}
+
 // Raw helper functions used below: get any value in memory as a 64bit int, a
 // double or a string.
 // All scalars get static_cast to an int64_t, strings use strtoull, every other
@@ -335,6 +351,8 @@ template<typename T, typename U> pointer_inside_vector<T, U> piv(T *ptr,
   return pointer_inside_vector<T, U>(ptr, vec);
 }
 
+inline const char *UnionTypeFieldSuffix() { return "_type"; }
+
 // Helper to figure out the actual table type a union refers to.
 inline const reflection::Object &GetUnionType(
     const reflection::Schema &schema, const reflection::Object &parent,
@@ -342,7 +360,7 @@ inline const reflection::Object &GetUnionType(
   auto enumdef = schema.enums()->Get(unionfield.type()->index());
   // TODO: this is clumsy and slow, but no other way to find it?
   auto type_field = parent.fields()->LookupByKey(
-            (unionfield.name()->str() + "_type").c_str());
+            (unionfield.name()->str() + UnionTypeFieldSuffix()).c_str());
   assert(type_field);
   auto union_type = GetFieldI<uint8_t>(table, *type_field);
   auto enumval = enumdef->values()->LookupByKey(union_type);
@@ -368,6 +386,7 @@ uint8_t *ResizeAnyVector(const reflection::Schema &schema, uoffset_t newsize,
                          uoffset_t elem_size, std::vector<uint8_t> *flatbuf,
                          const reflection::Object *root_table = nullptr);
 
+#ifndef FLATBUFFERS_CPP98_STL
 template <typename T>
 void ResizeVector(const reflection::Schema &schema, uoffset_t newsize, T val,
                   const Vector<T> *vec, std::vector<uint8_t> *flatbuf,
@@ -389,6 +408,7 @@ void ResizeVector(const reflection::Schema &schema, uoffset_t newsize, T val,
     }
   }
 }
+#endif
 
 // Adds any new data (in the form of a new FlatBuffer) to an existing
 // FlatBuffer. This can be used when any of the above methods are not
@@ -423,6 +443,15 @@ Offset<const Table *> CopyTable(FlatBufferBuilder &fbb,
                                 const reflection::Object &objectdef,
                                 const Table &table,
                                 bool use_string_pooling = false);
+
+// Verifies the provided flatbuffer using reflection.
+// root should point to the root type for this flatbuffer.
+// buf should point to the start of flatbuffer data.
+// length specifies the size of the flatbuffer data.
+bool Verify(const reflection::Schema &schema,
+            const reflection::Object &root,
+            const uint8_t *buf,
+            size_t length);
 
 }  // namespace flatbuffers
 

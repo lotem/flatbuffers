@@ -41,6 +41,8 @@ flatsamplebinary
 flatsamplebinary.exe
 flatsampletext
 flatsampletext.exe
+grpctest
+grpctest.exe
 snapshot.sh
 tests/go_gen
 tests/rust_gen
@@ -57,10 +59,13 @@ build/Xcode/FlatBuffers.xcodeproj/xcuserdata/**
 FlatBuffers.xcodeproj/
 java/.idea
 java/*.iml
-java/target
-**/*.pyc
 .idea
+*.iml
+target
+**/*.pyc
 build/VS2010/FlatBuffers.sdf
 build/VS2010/FlatBuffers.opensdf
 build/VS2010/ipch/**/*.ipch
 .editorconfig
+*.so
+Testing/Temporary
