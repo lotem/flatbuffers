@@ -91,6 +91,7 @@ const Generator generators[] = {
     "Generate PHP files for tables/structs",
     flatbuffers::GeneralMakeRule },
   { flatbuffers::GenerateRust, "-r", "--rust", "Rust",
+    nullptr,
     flatbuffers::IDLOptions::kMAX,
     "Generate Rust files for tables/structs",
     flatbuffers::GeneralMakeRule },
