@@ -158,6 +158,10 @@ If you have a need to distinguish between different FlatBuffers in a more
 open-ended way, for example for use as files, see the file identification
 feature below.
 
+There is an experimental support only in C++ for a vector of unions
+(and types). In the example IDL file above, use [Any] to add a
+vector of Any to Monster table.
+
 ### Namespaces
 
 These will generate the corresponding namespace in C++ for all helper
@@ -309,6 +313,10 @@ Current understood attributes:
     to be stored in any particular order, they are often optimized for
     space by sorting them to size. This attribute stops that from happening.
     There should generally not be any reason to use this flag.
+-   'native_*'.  Several attributes have been added to support the [C++ object
+    Based API](@ref flatbuffers_cpp_object_based_api).  All such attributes
+    are prefixed with the term "native_".
+
 
 ## JSON Parsing
 

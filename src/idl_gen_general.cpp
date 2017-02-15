@@ -39,37 +39,6 @@ std::string MakeCamel(const std::string &in, bool first) {
   return s;
 }
 
-struct CommentConfig {
-  const char *first_line;
-  const char *content_line_prefix;
-  const char *last_line;
-};
-
-// Generate a documentation comment, if available.
-void GenComment(const std::vector<std::string> &dc, std::string *code_ptr,
-                const CommentConfig *config, const char *prefix) {
-  if (dc.begin() == dc.end()) {
-    // Don't output empty comment blocks with 0 lines of comment content.
-    return;
-  }
-
-  std::string &code = *code_ptr;
-  if (config != nullptr && config->first_line != nullptr) {
-    code += std::string(prefix) + std::string(config->first_line) + "\n";
-  }
-  std::string line_prefix = std::string(prefix) +
-      ((config != nullptr && config->content_line_prefix != nullptr) ?
-       config->content_line_prefix : "///");
-  for (auto it = dc.begin();
-       it != dc.end();
-       ++it) {
-    code += line_prefix + *it + "\n";
-  }
-  if (config != nullptr && config->last_line != nullptr) {
-    code += std::string(prefix) + std::string(config->last_line) + "\n";
-  }
-}
-
 // These arrays need to correspond to the IDLOptions::k enum.
 
 struct LanguageParameters {
@@ -101,108 +70,80 @@ struct LanguageParameters {
   CommentConfig comment_config;
 };
 
-LanguageParameters language_parameters[] = {
-  {
-    IDLOptions::kJava,
-    false,
-    ".java",
-    "String",
-    "boolean ",
-    " {\n",
-    "class ",
-    " final ",
-    "final ",
-    "final class ",
-    ";\n",
-    "()",
-    "",
-    " extends ",
-    "package ",
-    ";",
-    "",
-    "_bb.order(ByteOrder.LITTLE_ENDIAN); ",
-    "position()",
-    "offset()",
-    "",
-    "",
-    "",
-    "import java.nio.*;\nimport java.lang.*;\nimport java.util.*;\n"
-      "import com.google.flatbuffers.*;\n\n@SuppressWarnings(\"unused\")\n",
+const LanguageParameters& GetLangParams(IDLOptions::Language lang) {
+  static LanguageParameters language_parameters[] = {
     {
-      "/**",
-      " *",
-      " */",
+      IDLOptions::kJava,
+      false,
+      ".java",
+      "String",
+      "boolean ",
+      " {\n",
+      "class ",
+      " final ",
+      "final ",
+      "final class ",
+      ";\n",
+      "()",
+      "",
+      " extends ",
+      "package ",
+      ";",
+      "",
+      "_bb.order(ByteOrder.LITTLE_ENDIAN); ",
+      "position()",
+      "offset()",
+      "",
+      "",
+      "",
+      "import java.nio.*;\nimport java.lang.*;\nimport java.util.*;\n"
+        "import com.google.flatbuffers.*;\n\n@SuppressWarnings(\"unused\")\n",
+      {
+        "/**",
+        " *",
+        " */",
+      },
     },
-  },
-  {
-    IDLOptions::kCSharp,
-    true,
-    ".cs",
-    "string",
-    "bool ",
-    "\n{\n",
-    "struct ",
-    " readonly ",
-    "",
-    "enum ",
-    ",\n",
-    " { get",
-    "} ",
-    " : ",
-    "namespace ",
-    "\n{",
-    "\n}\n",
-    "",
-    "Position",
-    "Offset",
-    "__p.",
-    "Table.",
-    "?",
-    "using System;\nusing FlatBuffers;\n\n",
     {
-      nullptr,
-      "///",
-      nullptr,
+      IDLOptions::kCSharp,
+      true,
+      ".cs",
+      "string",
+      "bool ",
+      "\n{\n",
+      "struct ",
+      " readonly ",
+      "",
+      "enum ",
+      ",\n",
+      " { get",
+      "} ",
+      " : ",
+      "namespace ",
+      "\n{",
+      "\n}\n",
+      "",
+      "Position",
+      "Offset",
+      "__p.",
+      "Table.",
+      "?",
+      "using System;\nusing FlatBuffers;\n\n",
+      {
+        nullptr,
+        "///",
+        nullptr,
+      },
     },
-  },
-  // TODO: add Go support to the general generator.
-  // WARNING: this is currently only used for generating make rules for Go.
-  {
-    IDLOptions::kGo,
-    true,
-    ".go",
-    "string",
-    "bool ",
-    "\n{\n",
-    "class ",
-    "const ",
-    " ",
-    "class ",
-    ";\n",
-    "()",
-    "",
-    "",
-    "package ",
-    "",
-    "",
-    "",
-    "position()",
-    "offset()",
-    "",
-    "",
-    "",
-    "import (\n\tflatbuffers \"github.com/google/flatbuffers/go\"\n)",
-    {
-      nullptr,
-      "///",
-      nullptr,
-    },
-  }
-};
+  };
 
-static_assert(sizeof(language_parameters) / sizeof(LanguageParameters) ==
-              IDLOptions::kMAX,
-              "Please add extra elements to the arrays above.");
+  if (lang == IDLOptions::kJava) {
+    return language_parameters[0];
+  } else {
+    assert(lang == IDLOptions::kCSharp);
+    return language_parameters[1];
+  }
+}
 
 namespace general {
 class GeneralGenerator : public BaseGenerator {
@@ -210,10 +151,10 @@ class GeneralGenerator : public BaseGenerator {
   GeneralGenerator(const Parser &parser, const std::string &path,
                    const std::string &file_name)
       : BaseGenerator(parser, path, file_name, "", "."),
-        lang_(language_parameters[parser_.opts.lang]),
+        lang_(GetLangParams(parser_.opts.lang)),
         cur_name_space_( nullptr ) {
-    assert(parser_.opts.lang <= IDLOptions::kMAX);
-      };
+  }
+
   GeneralGenerator &operator=(const GeneralGenerator &);
   bool generate() {
     std::string one_file_code;
@@ -276,7 +217,7 @@ class GeneralGenerator : public BaseGenerator {
     return SaveFile(filename.c_str(), code, false);
   }
 
-  const Namespace *CurrentNameSpace() { return cur_name_space_; }
+  const Namespace *CurrentNameSpace() const { return cur_name_space_; }
 
   std::string FunctionStart(char upper) {
     return std::string() + (lang_.language == IDLOptions::kJava
@@ -289,9 +230,16 @@ static bool IsEnum(const Type& type) {
 }
 
 std::string GenTypeBasic(const Type &type, bool enableLangOverrides) {
-  static const char *gtypename[] = {
-  #define FLATBUFFERS_TD(ENUM, IDLTYPE, CTYPE, JTYPE, GTYPE, NTYPE, PTYPE, RTYPE) \
-        #JTYPE, #NTYPE, #GTYPE,
+  static const char *java_typename[] = {
+    #define FLATBUFFERS_TD(ENUM, IDLTYPE, CTYPE, JTYPE, GTYPE, NTYPE, PTYPE, RTYPE) \
+        #JTYPE,
+      FLATBUFFERS_GEN_TYPES(FLATBUFFERS_TD)
+    #undef FLATBUFFERS_TD
+  };
+
+  static const char *csharp_typename[] = {
+    #define FLATBUFFERS_TD(ENUM, IDLTYPE, CTYPE, JTYPE, GTYPE, NTYPE, PTYPE, RTYPE) \
+        #NTYPE,
       FLATBUFFERS_GEN_TYPES(FLATBUFFERS_TD)
     #undef FLATBUFFERS_TD
   };
@@ -305,7 +253,12 @@ std::string GenTypeBasic(const Type &type, bool enableLangOverrides) {
     }
   }
 
-  return gtypename[type.base_type * IDLOptions::kMAX + lang_.language];
+  if (lang_.language == IDLOptions::kJava) {
+    return java_typename[type.base_type];
+  } else {
+    assert(lang_.language == IDLOptions::kCSharp);
+    return csharp_typename[type.base_type];
+  }
 }
 
 std::string GenTypeBasic(const Type &type) {
@@ -495,7 +448,7 @@ std::string GenDefaultValue(const Value &value, bool enableLangOverrides) {
   switch (value.type.base_type) {
     case BASE_TYPE_FLOAT: return value.constant + "f";
     case BASE_TYPE_BOOL: return value.constant == "0" ? "false" : "true";
-    case BASE_TYPE_ULONG: 
+    case BASE_TYPE_ULONG:
     {
       if (lang_.language != IDLOptions::kJava)
         return value.constant;
@@ -1383,7 +1336,7 @@ void GenStruct(StructDef &struct_def, std::string *code_ptr) {
   code += (lang_.language != IDLOptions::kJava) ? ";" : "";
   code += "\n\n";
 }
-    const LanguageParameters & lang_;
+    const LanguageParameters& lang_;
     // This tracks the current namespace used to determine if a type need to be prefixed by its namespace
     const Namespace *cur_name_space_;
 };
@@ -1398,7 +1351,7 @@ bool GenerateGeneral(const Parser &parser, const std::string &path,
 std::string GeneralMakeRule(const Parser &parser, const std::string &path,
                             const std::string &file_name) {
   assert(parser.opts.lang <= IDLOptions::kMAX);
-  auto lang = language_parameters[parser.opts.lang];
+  const auto &lang = GetLangParams(parser.opts.lang);
 
   std::string make_rule;
 

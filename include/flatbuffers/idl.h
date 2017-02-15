@@ -339,6 +339,7 @@ struct ServiceDef : public Definition {
 struct IDLOptions {
   bool strict_json;
   bool skip_js_exports;
+  bool use_goog_js_export_format;
   bool output_default_scalars_in_json;
   int indent_step;
   bool output_enum_identifiers;
@@ -357,15 +358,33 @@ struct IDLOptions {
   std::string cpp_object_api_pointer_type;
   bool union_value_namespacing;
   bool allow_non_utf8;
+  std::string include_prefix;
+  bool binary_schema_comments;
 
   // Possible options for the more general generator below.
-  enum Language { kJava, kCSharp, kGo, kMAX };
+  enum Language {
+    kJava   = 1 << 0,
+    kCSharp = 1 << 1,
+    kGo     = 1 << 2,
+    kCpp    = 1 << 3,
+    kJs     = 1 << 4,
+    kPython = 1 << 5,
+    kPhp    = 1 << 6,
+    kJson   = 1 << 7,
+    kBinary = 1 << 8,
+    kMAX
+  };
 
   Language lang;
+
+  // The corresponding language bit will be set if a language is included
+  // for code generation.
+  unsigned long lang_to_generate;
 
   IDLOptions()
     : strict_json(false),
       skip_js_exports(false),
+      use_goog_js_export_format(false),
       output_default_scalars_in_json(false),
       indent_step(2),
       output_enum_identifiers(true), prefixed_enums(true), scoped_enums(false),
@@ -382,7 +401,9 @@ struct IDLOptions {
       cpp_object_api_pointer_type("std::unique_ptr"),
       union_value_namespacing(true),
       allow_non_utf8(false),
-      lang(IDLOptions::kJava) {}
+      binary_schema_comments(false),
+      lang(IDLOptions::kJava),
+      lang_to_generate(0) {}
 };
 
 // This encapsulates where the parser is in the current source file.
@@ -463,6 +484,8 @@ class Parser : public ParserState {
     known_attributes_["cpp_type"] = true;
     known_attributes_["cpp_ptr_type"] = true;
     known_attributes_["native_inline"] = true;
+    known_attributes_["native_type"] = true;
+    known_attributes_["native_default"] = true;
   }
 
   ~Parser() {
@@ -506,7 +529,7 @@ class Parser : public ParserState {
 
 private:
   FLATBUFFERS_CHECKED_ERROR Error(const std::string &msg);
-  FLATBUFFERS_CHECKED_ERROR ParseHexNum(int nibbles, int64_t *val);
+  FLATBUFFERS_CHECKED_ERROR ParseHexNum(int nibbles, uint64_t *val);
   FLATBUFFERS_CHECKED_ERROR Next();
   FLATBUFFERS_CHECKED_ERROR SkipByteOrderMark();
   bool Is(int t);
@@ -564,6 +587,7 @@ private:
                                        BaseType baseType);
 
  public:
+  SymbolTable<Type> types_;
   SymbolTable<StructDef> structs_;
   SymbolTable<EnumDef> enums_;
   SymbolTable<ServiceDef> services_;
@@ -577,6 +601,7 @@ private:
 
   std::map<std::string, bool> included_files_;
   std::map<std::string, std::set<std::string>> files_included_per_file_;
+  std::vector<std::string> native_included_files_;
 
   std::map<std::string, bool> known_attributes_;
 
@@ -595,13 +620,6 @@ private:
 // Utility functions for multiple generators:
 
 extern std::string MakeCamel(const std::string &in, bool first = true);
-
-struct CommentConfig;
-
-extern void GenComment(const std::vector<std::string> &dc,
-                       std::string *code_ptr,
-                       const CommentConfig *config,
-                       const char *prefix = "");
 
 // Generate text (JSON) from a given FlatBuffer, and a given Parser
 // object that has been populated with the corresponding schema.

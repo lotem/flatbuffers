@@ -21,10 +21,13 @@
 #include "monster_test_generated.h"
 #include "namespace_test/namespace_test1_generated.h"
 #include "namespace_test/namespace_test2_generated.h"
+#include "union_vector/union_vector_generated.h"
 
 #ifndef FLATBUFFERS_CPP98_STL
   #include <random>
 #endif
+
+#include "flatbuffers/flexbuffers.h"
 
 using namespace MyGame::Example;
 
@@ -490,8 +493,6 @@ void ReflectionTest(uint8_t *flatbuf, size_t length) {
   TEST_NOTNULL(pos_table_ptr);
   TEST_EQ_STR(pos_table_ptr->name()->c_str(), "MyGame.Example.Vec3");
 
-  
-
   // Now use it to dynamically access a buffer.
   auto &root = *flatbuffers::GetAnyRoot(flatbuf);
 
@@ -606,11 +607,11 @@ void ReflectionTest(uint8_t *flatbuf, size_t length) {
         reinterpret_cast<const uint8_t *>(resizingbuf.data()),
         resizingbuf.size());
   TEST_EQ(VerifyMonsterBuffer(resize_verifier), true);
-    
+
   // Test buffer is valid using reflection as well
   TEST_EQ(flatbuffers::Verify(schema, *schema.root_table(), resizingbuf.data(),
                               resizingbuf.size()), true);
-  
+
   // As an additional test, also set it on the name field.
   // Note: unlike the name change above, this just overwrites the offset,
   // rather than changing the string in-place.
@@ -954,7 +955,6 @@ void ErrorTest() {
   TestError("@", "illegal");
   TestError("table 1", "expecting");
   TestError("table X { Y:[[int]]; }", "nested vector");
-  TestError("union Z { X } table X { Y:[Z]; }", "vector of union");
   TestError("table X { Y:1; }", "illegal type");
   TestError("table X { Y:int; Y:int; }", "field already");
   TestError("struct X { Y:string; }", "only scalar");
@@ -994,14 +994,13 @@ template<typename T> T TestValue(const char *json, const char *type_name) {
   flatbuffers::Parser parser;
 
   // Simple schema.
-  TEST_EQ(parser.Parse(std::string("table X { Y:" + std::string(type_name) + "; } root_type X;").c_str()), true);
+  TEST_EQ(parser.Parse(std::string("table X { Y:" + std::string(type_name) +
+                                   "; } root_type X;").c_str()), true);
 
   TEST_EQ(parser.Parse(json), true);
-  auto root = flatbuffers::GetRoot<T>(parser.builder_.GetBufferPointer());
-  // root will point to the table, which is a 32bit vtable offset followed
-  // by a float:
-  TEST_EQ(sizeof(flatbuffers::soffset_t), 4);  // Test assumes 32bit offsets
-  return root[1];
+  auto root = flatbuffers::GetRoot<flatbuffers::Table>(
+                parser.builder_.GetBufferPointer());
+  return root->GetField<T>(flatbuffers::FieldIndexToOffset(0), 0);
 }
 
 bool FloatCompare(float a, float b) { return fabs(a - b) < 0.001; }
@@ -1009,13 +1008,19 @@ bool FloatCompare(float a, float b) { return fabs(a - b) < 0.001; }
 // Additional parser testing not covered elsewhere.
 void ValueTest() {
   // Test scientific notation numbers.
-  TEST_EQ(FloatCompare(TestValue<float>("{ Y:0.0314159e+2 }","float"), (float)3.14159), true);
+  TEST_EQ(FloatCompare(TestValue<float>("{ Y:0.0314159e+2 }","float"),
+                       (float)3.14159), true);
 
   // Test conversion functions.
-  TEST_EQ(FloatCompare(TestValue<float>("{ Y:cos(rad(180)) }","float"), -1), true);
+  TEST_EQ(FloatCompare(TestValue<float>("{ Y:cos(rad(180)) }","float"), -1),
+          true);
 
   // Test negative hex constant.
-  TEST_EQ(TestValue<int>("{ Y:-0x80 }","int") == -128, true);
+  TEST_EQ(TestValue<int>("{ Y:-0x80 }","int"), -128);
+
+  // Make sure we do unsigned 64bit correctly.
+  TEST_EQ(TestValue<uint64_t>("{ Y:12335089644688340133 }","ulong"),
+                              12335089644688340133ULL);
 }
 
 void EnumStringsTest() {
@@ -1276,6 +1281,67 @@ void ParseUnionTest() {
                         "{ e_type: N_A, e: {} }"), true);
 }
 
+void UnionVectorTest() {
+  // load FlatBuffer fbs schema.
+  // TODO: load a JSON file with such a vector when JSON support is ready.
+  std::string schemafile;
+  TEST_EQ(flatbuffers::LoadFile(
+    "tests/union_vector/union_vector.fbs", false, &schemafile), true);
+
+  // parse schema.
+  flatbuffers::IDLOptions idl_opts;
+  idl_opts.lang_to_generate |= flatbuffers::IDLOptions::kCpp;
+  flatbuffers::Parser parser(idl_opts);
+  const char *include_directories[] = { "tests/union_vector", nullptr };
+  TEST_EQ(parser.Parse(schemafile.c_str(), include_directories), true);
+
+  flatbuffers::FlatBufferBuilder fbb;
+
+  // union types.
+  std::vector<uint8_t> types;
+  types.push_back(static_cast<uint8_t>(Character_Belle));
+  types.push_back(static_cast<uint8_t>(Character_Rapunzel));
+  types.push_back(static_cast<uint8_t>(Character_MuLan));
+
+  // union values.
+  std::vector<flatbuffers::Offset<void>> characters;
+  characters.push_back(CreateBelle(fbb, /*books_read=*/7).Union());
+  characters.push_back(CreateRapunzel(fbb, /*hair_length=*/6).Union());
+  characters.push_back(CreateMuLan(fbb, /*sword_attack_damage=*/5).Union());
+
+  // create Movie.
+  const auto movie_offset =
+      CreateMovie(fbb, fbb.CreateVector(types), fbb.CreateVector(characters));
+  FinishMovieBuffer(fbb, movie_offset);
+  uint8_t *buf = fbb.GetBufferPointer();
+
+  flatbuffers::Verifier verifier(buf, fbb.GetSize());
+  TEST_EQ(VerifyMovieBuffer(verifier), true);
+
+  const Movie *movie = GetMovie(buf);
+  TEST_EQ(movie->characters_type()->size(), 3);
+  TEST_EQ(
+      movie->characters_type()->GetEnum<Character>(0) == Character_Belle,
+      true);
+  TEST_EQ(
+      movie->characters_type()->GetEnum<Character>(1) == Character_Rapunzel,
+      true);
+  TEST_EQ(
+      movie->characters_type()->GetEnum<Character>(2) == Character_MuLan,
+      true);
+
+  TEST_EQ(movie->characters()->size(), 3);
+  const Belle *belle =
+      reinterpret_cast<const Belle*>(movie->characters()->Get(0));
+  TEST_EQ(belle->books_read(), 7);
+  const Rapunzel *rapunzel =
+      reinterpret_cast<const Rapunzel*>(movie->characters()->Get(1));
+  TEST_EQ(rapunzel->hair_length(), 6);
+  const MuLan *mu_lan =
+      reinterpret_cast<const MuLan*>(movie->characters()->Get(2));
+  TEST_EQ(mu_lan->sword_attack_damage(), 5);
+}
+
 void ConformTest() {
   flatbuffers::Parser parser;
   TEST_EQ(parser.Parse("table T { A:int; } enum E:byte { A }"), true);
@@ -1292,6 +1358,66 @@ void ConformTest() {
   test_conform("table T { A:int = 1; }", "defaults differ for field");
   test_conform("table T { B:float; }", "field renamed to different type");
   test_conform("enum E:byte { B, A }", "values differ for enum");
+}
+
+void FlexBuffersTest() {
+  flexbuffers::Builder slb(512,
+                           flexbuffers::BUILDER_FLAG_SHARE_KEYS_AND_STRINGS);
+
+  // Write the equivalent of:
+  // { vec: [ -100, "Fred", 4.0 ], bar: [ 1, 2, 3 ], foo: 100 }
+  slb.Map([&]() {
+     slb.Vector("vec", [&]() {
+      slb += -100;  // Equivalent to slb.Add(-100) or slb.Int(-100);
+      slb += "Fred";
+      slb.IndirectFloat(4.0f);
+    });
+    int ints[] = { 1, 2, 3 };
+    slb.Vector("bar", ints, 3);
+    slb.FixedTypedVector("bar3", ints, 3);
+    slb.Double("foo", 100);
+    slb.Map("mymap", [&]() {
+      slb.String("foo", "Fred");  // Testing key and string reuse.
+    });
+  });
+  slb.Finish();
+
+  for (size_t i = 0; i < slb.GetBuffer().size(); i++)
+    printf("%d ", slb.GetBuffer().data()[i]);
+  printf("\n");
+
+  auto map = flexbuffers::GetRoot(slb.GetBuffer()).AsMap();
+  TEST_EQ(map.size(), 5);
+  auto vec = map["vec"].AsVector();
+  TEST_EQ(vec.size(), 3);
+  TEST_EQ(vec[0].AsInt64(), -100);
+  TEST_EQ_STR(vec[1].AsString().c_str(), "Fred");
+  TEST_EQ(vec[1].AsInt64(), 0);  // Number parsing failed.
+  TEST_EQ(vec[2].AsDouble(), 4.0);
+  TEST_EQ(vec[2].AsString().IsTheEmptyString(), true);  // Wrong Type.
+  TEST_EQ_STR(vec[2].AsString().c_str(), "");  // This still works though.
+  TEST_EQ_STR(vec[2].ToString().c_str(), "4");  // Or have it converted.
+  auto tvec = map["bar"].AsTypedVector();
+  TEST_EQ(tvec.size(), 3);
+  TEST_EQ(tvec[2].AsInt8(), 3);
+  auto tvec3 = map["bar3"].AsFixedTypedVector();
+  TEST_EQ(tvec3.size(), 3);
+  TEST_EQ(tvec3[2].AsInt8(), 3);
+  TEST_EQ(map["foo"].AsUInt8(), 100);
+  TEST_EQ(map["unknown"].IsNull(), true);
+  auto mymap = map["mymap"].AsMap();
+  // These should be equal by pointer equality, since key and value are shared.
+  TEST_EQ(mymap.Keys()[0].AsKey(), map.Keys()[2].AsKey());
+  TEST_EQ(mymap.Values()[0].AsString().c_str(), vec[1].AsString().c_str());
+  // We can mutate values in the buffer.
+  TEST_EQ(vec[0].MutateInt(-99), true);
+  TEST_EQ(vec[0].AsInt64(), -99);
+  TEST_EQ(vec[1].MutateString("John"), true);  // Size must match.
+  TEST_EQ_STR(vec[1].AsString().c_str(), "John");
+  TEST_EQ(vec[1].MutateString("Alfred"), false);  // Too long.
+  TEST_EQ(vec[2].MutateFloat(2.0f), true);
+  TEST_EQ(vec[2].AsFloat(), 2.0f);
+  TEST_EQ(vec[2].MutateFloat(3.14159), false);  // Double does not fit in float.
 }
 
 int main(int /*argc*/, const char * /*argv*/[]) {
@@ -1313,6 +1439,7 @@ int main(int /*argc*/, const char * /*argv*/[]) {
   ParseAndGenerateTextTest();
   ReflectionTest(flatbuf.get(), rawbuf.length());
   ParseProtoTest();
+  UnionVectorTest();
   #endif
 
   FuzzTest1();
@@ -1331,6 +1458,8 @@ int main(int /*argc*/, const char * /*argv*/[]) {
   UnknownFieldsTest();
   ParseUnionTest();
   ConformTest();
+
+  FlexBuffersTest();
 
   if (!testing_fails) {
     TEST_OUTPUT_LINE("ALL TESTS PASSED");

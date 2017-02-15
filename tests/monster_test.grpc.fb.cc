@@ -4,6 +4,7 @@
 
 #include "monster_test_generated.h"
 #include "monster_test.grpc.fb.h"
+
 #include <grpc++/impl/codegen/async_stream.h>
 #include <grpc++/impl/codegen/async_unary_call.h>
 #include <grpc++/impl/codegen/channel_interface.h>
@@ -12,12 +13,13 @@
 #include <grpc++/impl/codegen/rpc_service_method.h>
 #include <grpc++/impl/codegen/service_type.h>
 #include <grpc++/impl/codegen/sync_stream.h>
+
 namespace MyGame {
 namespace Example {
 
 static const char* MonsterStorage_method_names[] = {
-  "/MyGame.Example..MonsterStorage/Store",
-  "/MyGame.Example..MonsterStorage/Retrieve",
+  "/MyGame.Example.MonsterStorage/Store",
+  "/MyGame.Example.MonsterStorage/Retrieve",
 };
 
 std::unique_ptr< MonsterStorage::Stub> MonsterStorage::NewStub(const std::shared_ptr< ::grpc::ChannelInterface>& channel, const ::grpc::StubOptions& options) {

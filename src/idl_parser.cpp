@@ -109,6 +109,12 @@ template<typename T> inline CheckedError atot(const char *s, Parser &parser,
   *val = (T)i;
   return NoError();
 }
+template<> inline CheckedError atot<uint64_t>(const char *s, Parser &parser,
+                                              uint64_t *val) {
+  (void)parser;
+  *val = StringToUInt(s);
+  return NoError();
+}
 template<> inline CheckedError atot<bool>(const char *s, Parser &parser,
                                           bool *val) {
   (void)parser;
@@ -150,8 +156,7 @@ std::string Namespace::GetFullyQualifiedName(const std::string &name,
     }
     stream << components[i];
   }
-
-  stream << sep << name;
+  if (name.length()) stream << "." << name;
   return stream.str();
 }
 
@@ -176,7 +181,8 @@ std::string Namespace::GetFullyQualifiedName(const std::string &name,
   TD(Include, 269, "include") \
   TD(Attribute, 270, "attribute") \
   TD(Null, 271, "null") \
-  TD(Service, 272, "rpc_service")
+  TD(Service, 272, "rpc_service") \
+  TD(NativeInclude, 273, "native_include")
 #ifdef __GNUC__
 __extension__  // Stop GCC complaining about trailing comma with -Wpendantic.
 #endif
@@ -214,7 +220,7 @@ std::string Parser::TokenToStringId(int t) {
 }
 
 // Parses exactly nibbles worth of hex digits into a number, or error.
-CheckedError Parser::ParseHexNum(int nibbles, int64_t *val) {
+CheckedError Parser::ParseHexNum(int nibbles, uint64_t *val) {
   for (int i = 0; i < nibbles; i++)
     if (!isxdigit(static_cast<const unsigned char>(cursor_[i])))
       return Error("escape code must be followed by " + NumToString(nibbles) +
@@ -281,14 +287,14 @@ CheckedError Parser::Next() {
               case '/':  attribute_ += '/';  cursor_++; break;
               case 'x': {  // Not in the JSON standard
                 cursor_++;
-                int64_t val;
+                uint64_t val;
                 ECHECK(ParseHexNum(2, &val));
                 attribute_ += static_cast<char>(val);
                 break;
               }
               case 'u': {
                 cursor_++;
-                int64_t val;
+                uint64_t val;
                 ECHECK(ParseHexNum(4, &val));
                 if (val >= 0xD800 && val <= 0xDBFF) {
                   if (unicode_high_surrogate != -1) {
@@ -434,12 +440,17 @@ CheckedError Parser::Next() {
             token_ = kTokenService;
             return NoError();
           }
+          if (attribute_ == "native_include") {
+            token_ = kTokenNativeInclude;
+            return NoError();
+          }
           // If not, it is a user-defined identifier:
           token_ = kTokenIdentifier;
           return NoError();
         } else if (isdigit(static_cast<unsigned char>(c)) || c == '-') {
           const char *start = cursor_ - 1;
-          if (c == '-' && *cursor_ == '0' && (cursor_[1] == 'x' || cursor_[1] == 'X')) {
+          if (c == '-' && *cursor_ == '0' &&
+              (cursor_[1] == 'x' || cursor_[1] == 'X')) {
             ++start;
             ++cursor_;
             attribute_.append(&c, &c + 1);
@@ -449,7 +460,8 @@ CheckedError Parser::Next() {
               cursor_++;
               while (isxdigit(static_cast<unsigned char>(*cursor_))) cursor_++;
               attribute_.append(start + 2, cursor_);
-              attribute_ = NumToString(StringToUInt(attribute_.c_str(), nullptr, 16));
+              attribute_ = NumToString(static_cast<int64_t>(
+                             StringToUInt(attribute_.c_str(), nullptr, 16)));
               token_ = kTokenIntegerConstant;
               return NoError();
           }
@@ -551,12 +563,6 @@ CheckedError Parser::ParseType(Type &type) {
         return Error(
               "nested vector types not supported (wrap in table first).");
       }
-      if (subtype.base_type == BASE_TYPE_UNION) {
-        // We could support this if we stored a struct of 2 elements per
-        // union element.
-        return Error(
-              "vector of union types not supported (wrap in table first).");
-      }
       type = Type(BASE_TYPE_VECTOR, subtype.struct_def, subtype.enum_def);
       type.element = subtype.base_type;
       EXPECT(']');
@@ -608,6 +614,19 @@ CheckedError Parser::ParseField(StructDef &struct_def) {
     // with a special suffix.
     ECHECK(AddField(struct_def, name + UnionTypeFieldSuffix(),
                     type.enum_def->underlying_type, &typefield));
+  } else if (type.base_type == BASE_TYPE_VECTOR &&
+             type.element == BASE_TYPE_UNION) {
+    // Only cpp supports the union vector feature so far.
+    if (opts.lang_to_generate != IDLOptions::kCpp) {
+      return Error("Vectors of unions are not yet supported in all "
+                   "the specified programming languages.");
+    }
+    // For vector of union fields, add a second auto-generated vector field to
+    // hold the types, with a special suffix.
+    Type union_vector(BASE_TYPE_VECTOR, nullptr, type.enum_def);
+    union_vector.element = BASE_TYPE_UTYPE;
+    ECHECK(AddField(struct_def, name + UnionTypeFieldSuffix(),
+                    union_vector, &typefield));
   }
 
   FieldDef *field;
@@ -724,8 +743,17 @@ CheckedError Parser::ParseAnyValue(Value &val, FieldDef *field,
     case BASE_TYPE_UNION: {
       assert(field);
       std::string constant;
-      if (!parent_fieldn ||
-          field_stack_.back().second->value.type.base_type != BASE_TYPE_UTYPE) {
+      // Find corresponding type field we may have already parsed.
+      for (auto elem = field_stack_.rbegin();
+           elem != field_stack_.rbegin() + parent_fieldn; ++elem) {
+        auto &type = elem->second->value.type;
+        if (type.base_type == BASE_TYPE_UTYPE &&
+            type.enum_def == val.type.enum_def) {
+          constant = elem->first.constant;
+          break;
+        }
+      }
+      if (constant.empty()) {
         // We haven't seen the type field yet. Sadly a lot of JSON writers
         // output these in alphabetical order, meaning it comes after this
         // value. So we scan past the value to find it, then come back here.
@@ -752,8 +780,6 @@ CheckedError Parser::ParseAnyValue(Value &val, FieldDef *field,
         constant = type_val.constant;
         // Got the information we needed, now rewind:
         *static_cast<ParserState *>(this) = backup;
-      } else {
-        constant = field_stack_.back().first.constant;
       }
       uint8_t enum_idx;
       ECHECK(atot(constant.c_str(), *this, &enum_idx));
@@ -832,16 +858,18 @@ CheckedError Parser::ParseTable(const StructDef &struct_def, std::string *value,
       } else {
         Value val = field->value;
         ECHECK(ParseAnyValue(val, field, fieldn, &struct_def));
-        size_t i = field_stack_.size();
         // Hardcoded insertion-sort with error-check.
         // If fields are specified in order, then this loop exits immediately.
-        for (; i > field_stack_.size() - fieldn; i--) {
-          auto existing_field = field_stack_[i - 1].second;
+        auto elem = field_stack_.rbegin();
+        for (; elem != field_stack_.rbegin() + fieldn; ++elem) {
+          auto existing_field = elem->second;
           if (existing_field == field)
             return Error("field set more than once: " + field->name);
           if (existing_field->value.offset < field->value.offset) break;
         }
-        field_stack_.insert(field_stack_.begin() + i, std::make_pair(val, field));
+        // Note: elem points to before the insertion point, thus .base() points
+        // to the correct spot.
+        field_stack_.insert(elem.base(), std::make_pair(val, field));
         fieldn++;
       }
     }
@@ -1295,6 +1323,8 @@ CheckedError Parser::ParseEnum(bool is_union, EnumDef **dest) {
     }
   }
   if (dest) *dest = &enum_def;
+  types_.Add(namespaces_.back()->GetFullyQualifiedName(enum_def.name),
+             new Type(BASE_TYPE_UNION, nullptr, &enum_def));
   return NoError();
 }
 
@@ -1400,6 +1430,8 @@ CheckedError Parser::ParseDecl() {
   ECHECK(CheckClash(fields, struct_def, "_byte_vector", BASE_TYPE_STRING));
   ECHECK(CheckClash(fields, struct_def, "ByteVector", BASE_TYPE_STRING));
   EXPECT('}');
+  types_.Add(namespaces_.back()->GetFullyQualifiedName(struct_def->name),
+             new Type(BASE_TYPE_STRUCT, struct_def, nullptr));
   return NoError();
 }
 
@@ -1837,6 +1869,7 @@ CheckedError Parser::DoParse(const char *source, const char **include_paths,
   source_ = cursor_ = source;
   line_ = 1;
   error_.clear();
+  field_stack_.clear();
   builder_.Clear();
   // Start with a blank namespace just in case this file doesn't have one.
   namespaces_.push_back(new Namespace());
@@ -1849,6 +1882,10 @@ CheckedError Parser::DoParse(const char *source, const char **include_paths,
         (attribute_ == "option" || attribute_ == "syntax" ||
          attribute_ == "package")) {
         ECHECK(ParseProtoDecl());
+    } else if (Is(kTokenNativeInclude)) {
+      NEXT();
+      native_included_files_.emplace_back(attribute_);
+      EXPECT(kTokenStringConstant);
     } else if (Is(kTokenInclude) ||
                (opts.proto_mode &&
                 attribute_ == "import" &&
@@ -2050,7 +2087,11 @@ Offset<reflection::Object> StructDef::Serialize(FlatBufferBuilder *builder,
                                   fixed,
                                   static_cast<int>(minalign),
                                   static_cast<int>(bytesize),
-                                  SerializeAttributes(builder, parser));
+                                  SerializeAttributes(builder, parser),
+                                  parser.opts.binary_schema_comments
+                                    ? builder->CreateVectorOfStrings(
+                                        doc_comment)
+                                    : 0);
 }
 
 Offset<reflection::Field> FieldDef::Serialize(FlatBufferBuilder *builder,
@@ -2070,7 +2111,10 @@ Offset<reflection::Field> FieldDef::Serialize(FlatBufferBuilder *builder,
                                  deprecated,
                                  required,
                                  key,
-                                 SerializeAttributes(builder, parser));
+                                 SerializeAttributes(builder, parser),
+                                 parser.opts.binary_schema_comments
+                                   ? builder->CreateVectorOfStrings(doc_comment)
+                                   : 0);
   // TODO: value.constant is almost always "0", we could save quite a bit of
   // space by sharing it. Same for common values of value.type.
 }
@@ -2087,7 +2131,10 @@ Offset<reflection::Enum> EnumDef::Serialize(FlatBufferBuilder *builder,
                                 builder->CreateVector(enumval_offsets),
                                 is_union,
                                 underlying_type.Serialize(builder),
-                                SerializeAttributes(builder, parser));
+                                SerializeAttributes(builder, parser),
+                                parser.opts.binary_schema_comments
+                                  ? builder->CreateVectorOfStrings(doc_comment)
+                                  : 0);
 }
 
 Offset<reflection::EnumVal> EnumVal::Serialize(FlatBufferBuilder *builder) const
