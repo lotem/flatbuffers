@@ -120,6 +120,18 @@ macro_rules! flatbuffers_object {
     (@table_fun { }) => {};
     (@table_fun { field => }) => {};
     (@table_fun { field => { name = $name:ident,
+                             typeOf = Union($ret_ty:ty = $fi:ident),
+                             slot = $slot:expr
+                             $(, default = $default:expr)*
+                             $(, comment = $comment:expr)*}
+                  $(, field => $body:tt)* $(,)*}) => {
+        $( #[doc = $comment] )*
+        fn $name(&self) -> $ret_ty {
+            flatbuffers_object!(@table_accessor self Union($ret_ty = $fi) $slot, $($default)*)
+        }
+        flatbuffers_object!(@table_fun { $( field => $body, )* });
+    };
+    (@table_fun { field => { name = $name:ident,
                              typeOf = $ret_ty:ty,
                              slot = $slot:expr
                              $(, default = $default:expr)*
@@ -129,7 +141,7 @@ macro_rules! flatbuffers_object {
         fn $name(&self) -> $ret_ty {
             flatbuffers_object!(@table_accessor self $ret_ty $slot, $($default)*)
         }
-        flatbuffers_object!(@table_fun { field => $($body)* });
+        flatbuffers_object!(@table_fun { $( field => $body, )* });
     };
     (@struct_fun { }) => {};
     (@struct_fun { field => }) => {};
@@ -143,7 +155,7 @@ macro_rules! flatbuffers_object {
             fn $name(&self) -> $ret_ty {
                 flatbuffers_object!(@struct_accessor self $ret_ty $slot)
             }
-        flatbuffers_object!(@struct_fun { field => $($body)* });
+        flatbuffers_object!(@struct_fun { $( field => $body, )* });
     };
     (@from_table $name:ident) => {
         impl<T: AsRef<[u8]>> From<$crate::Table<T>> for $name<T> {
@@ -181,7 +193,7 @@ macro_rules! flatbuffers_object {
     };
     // Struct
     ($name:ident =>
-     fixed_size = $inline_size:expr,
+     Struct (fixed_size = $inline_size:expr)
      $body:tt ) => {
 
         #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,7 +208,7 @@ macro_rules! flatbuffers_object {
         flatbuffers_object!(@vector_type $name $inline_size);
     };
     // Simple Enum
-    ($name:ident => Enum {$( ($e_name:ident = $value:expr) ),+ }
+    ($name:ident => Enum {$( $e_name:ident = $value:expr ),+ }
      as $repr:ty) => {
         #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
         #[repr($repr)]
@@ -214,7 +226,7 @@ macro_rules! flatbuffers_object {
         }
     };
     // Union
-    ($name:ident => $ty:ident {$( ($e_name:ident = $value:expr) ),+ }
+    ($name:ident => $ty:ident {$( $e_name:ident = $value:expr ),+ }
      as $repr:ty) => {
         #[derive(Debug)]
         pub enum $name {
@@ -223,15 +235,15 @@ macro_rules! flatbuffers_object {
         }
 
         impl $name {
-            pub fn new(table: $crate::Table, utype: Option<$type_name>) -> Option<$name> {
+            pub fn new(table: $crate::Table, utype: Option<$ty>) -> Option<$name> {
                 match utype {
-                    $( Some($type_name::$e_name) => Some( $name::$e_name( table.into() ) ), )*
+                    $( Some($ty::$e_name) => Some( $name::$e_name( table.into() ) ), )*
                         _ => None
                 }
             }
         }
 
-        flatbuffers_object!($ty => Enum {$( ($e_name = $value) ),+ } as  $repr);
+        flatbuffers_object!($ty => Enum {$( $e_name = $value ),+ } as $repr);
     }
 }
 
