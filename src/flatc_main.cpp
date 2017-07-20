@@ -96,10 +96,15 @@ int main(int argc, const char *argv[]) {
       flatbuffers::IDLOptions::kPhp,
       "Generate PHP files for tables/structs",
       flatbuffers::GeneralMakeRule },
-   { flatbuffers::GenerateJsonSchema, nullptr, "--jsonschema", "JsonSchema", true,
+    { flatbuffers::GenerateJsonSchema, nullptr, "--jsonschema", "JsonSchema", true,
       nullptr,
       flatbuffers::IDLOptions::kJsonSchema,
       "Generate Json schema",
+      flatbuffers::GeneralMakeRule },
+    { flatbuffers::GenerateRust, "-r", "--rust", "Rust", true,
+      nullptr,
+      flatbuffers::IDLOptions::kRust,
+      "Generate Rust files for tables/structs",
       flatbuffers::GeneralMakeRule },
   };
 

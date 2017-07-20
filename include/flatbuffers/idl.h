@@ -384,6 +384,7 @@ struct IDLOptions {
     kBinary = 1 << 8,
     kTs     = 1 << 9,
     kJsonSchema = 1 << 10,
+    kRust   = 1 << 11,
     kMAX
   };
 

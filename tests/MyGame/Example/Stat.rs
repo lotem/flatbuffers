@@ -3,19 +3,10 @@
 use flatbuffers;
 use super::*;
 
-flatbuffers_object!{Table => Stat [
- field => { name = id,
-            typeOf = string,
-            slot = 4,
-            default = 0 }, 
- field => { name = val,
-            typeOf = i64,
-            slot = 6,
-            default = 0 }, 
- field => { name = count,
-            typeOf = u16,
-            slot = 8,
-            default = 0 }]}
+table_object!{Stat, 4, [
+    (id,get_str, &str, 4, 0), 
+    (val,get_i64, i64, 6, 0), 
+    (count,get_u16, u16, 8, 0)]}
 
 /// Builder Trait for `Stat` tables.
 pub trait StatBuilder {

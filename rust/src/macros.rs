@@ -44,7 +44,7 @@ macro_rules! table_get_fn {
         }
     };
     (($name:ident, vector, $ty:ty, $slot:expr)) => {
-        pub fn $name<'a>(&self) -> flatbuffers::Iter<'a, $ty> {
+        pub fn $name(&self) -> flatbuffers::Iterator<$ty> {
             table_fn!(vector, self, $slot, $ty)
         }
     };
@@ -75,7 +75,7 @@ macro_rules! table_get_fn {
 #[macro_export]
 macro_rules! struct_get_fn {
     (($name:ident, get_struct, $ty:ty, $slot:expr)) => {
-        pub fn $name(&self) -> $ty<T> {
+        pub fn $name(&self) -> $ty {
             struct_fn!(get_struct, self, $slot, $ty)
         }
     };
@@ -96,16 +96,16 @@ macro_rules! struct_get_fn {
 macro_rules! basic_struct_def {
     ($name:ident) => {
         #[derive(Debug)]
-        pub struct $name<T: AsRef<[u8]>>($crate::Table<T>);
+        pub struct $name($crate::Table);
 
-        impl<T: AsRef<[u8]>> $name<T> {
-            pub fn new(table: $crate::Table<T>) -> $name<T> {
+        impl $name {
+            pub fn new(table: $crate::Table) -> $name {
                 $name ( table )
             }
         }
 
-        impl<T: AsRef<[u8]>> From<$crate::Table<T>> for $name<T> {
-            fn from(table: $crate::Table<T>) -> $name<T> {
+        impl From<$crate::Table> for $name {
+            fn from(table: $crate::Table) -> $name {
                 $name(table)
             }
         }
@@ -115,12 +115,13 @@ macro_rules! basic_struct_def {
 #[macro_export]
 macro_rules! table_object_trait {
     ($name:ident, $indirect:expr, $inline_size:expr) => {
-        impl<T: AsRef<[u8]>> $crate::VectorType for $name<T> {
+        impl $crate::TableObject for $name {
+            fn is_struct() -> bool {
+                $indirect
+            }
+
             fn inline_size() -> usize {
                 $inline_size
-            }
-            fn read_next(buffer: &[u8]) -> $name {
-                $crate::Table::get_indirect_root(buffer, 0).into(); 
             }
         }
     }
@@ -131,7 +132,7 @@ macro_rules! table_object {
     ($name:ident, $inline_size:expr, [ $( $f:tt ),* ]) => {
 
         basic_struct_def!{$name}
-        impl<T> $name<T> {
+        impl $name {
             $( table_get_fn!{$f} )*
         }
         table_object_trait!{ $name, false, $inline_size } 
@@ -143,7 +144,7 @@ macro_rules! struct_object {
     ($name:ident, $inline_size:expr, [ $( $f:tt ),* ]) => {
 
         basic_struct_def!{$name}
-        impl<T> $name<T> {
+        impl $name {
             $( struct_get_fn!{$f} )*
         }
         table_object_trait!{ $name, true, $inline_size }        
@@ -186,7 +187,7 @@ macro_rules! union {
         }
 
         impl $name {
-            pub fn new<T>(table: $crate::Table<T>, utype: Option<$type_name>) -> Option<$name> {
+            pub fn new(table: $crate::Table, utype: Option<$type_name>) -> Option<$name> {
                 match utype {
                     $( Some($type_name::$e_name) => Some( $name::$e_name( table.into() ) ), )*
                     _ => None

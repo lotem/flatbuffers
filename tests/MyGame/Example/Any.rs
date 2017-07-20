@@ -3,5 +3,7 @@
 use flatbuffers;
 use super::*;
 
-flatbuffers_object!{Union =>Any{ NONE = 0, Monster = 1, TestSimpleTableWithEnum = 2, MyGame_Example2_Monster = 3} as u8}
+union!{Any,AnyType,u8, [
+    (Monster, 1, Monster), 
+    (TestSimpleTableWithEnum, 2, TestSimpleTableWithEnum)]}
 

@@ -3,11 +3,8 @@
 use flatbuffers;
 use super::*;
 
-flatbuffers_object!{Table => TestSimpleTableWithEnum [
- field => { name = color,
-            typeOf = enum Color i8,
-            slot = 4,
-            default = 2 }]}
+table_object!{TestSimpleTableWithEnum, 4, [
+    (color,simple_enum,get_i8, i8, Color, 4, 2)]}
 
 /// Builder Trait for `TestSimpleTableWithEnum` tables.
 pub trait TestSimpleTableWithEnumBuilder {
