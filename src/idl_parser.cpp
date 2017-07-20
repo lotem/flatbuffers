@@ -86,26 +86,29 @@ CheckedError Parser::Error(const std::string &msg) {
 
 inline CheckedError NoError() { return CheckedError(false); }
 
+inline std::string OutOfRangeErrorMsg(int64_t val, const std::string &op,
+                                      int64_t limit) {
+  const std::string cause = NumToString(val) + op + NumToString(limit);
+  return "constant does not fit (" + cause + ")";
+}
+
 // Ensure that integer values we parse fit inside the declared integer type.
-CheckedError Parser::CheckBitsFit(int64_t val, size_t bits) {
-  // Left-shifting a 64-bit value by 64 bits or more is undefined
-  // behavior (C99 6.5.7), so check *before* we shift.
-  if (bits < 64) {
-    // Bits we allow to be used.
-    auto mask = static_cast<int64_t>((1ull << bits) - 1);
-    if ((val & ~mask) != 0 &&  // Positive or unsigned.
-        (val |  mask) != -1)   // Negative.
-      return Error("constant does not fit in a " + NumToString(bits) +
-                   "-bit field");
-  }
-  return NoError();
+CheckedError Parser::CheckInRange(int64_t val, int64_t min, int64_t max) {
+  if (val < min)
+    return Error(OutOfRangeErrorMsg(val, " < ", min));
+  else if (val > max)
+    return Error(OutOfRangeErrorMsg(val, " > ", max));
+  else
+    return NoError();
 }
 
 // atot: templated version of atoi/atof: convert a string to an instance of T.
 template<typename T> inline CheckedError atot(const char *s, Parser &parser,
                                               T *val) {
   int64_t i = StringToInt(s);
-  ECHECK(parser.CheckBitsFit(i, sizeof(T) * 8));
+  const int64_t min = std::numeric_limits<T>::min();
+  const int64_t max = std::numeric_limits<T>::max();
+  ECHECK(parser.CheckInRange(i, min, max));
   *val = (T)i;
   return NoError();
 }
@@ -599,6 +602,10 @@ CheckedError Parser::AddField(StructDef &struct_def, const std::string &name,
 
 CheckedError Parser::ParseField(StructDef &struct_def) {
   std::string name = attribute_;
+
+  if (name == struct_def.name)
+    return Error("field name can not be the same as table/struct name");
+
   std::vector<std::string> dc = doc_comment_;
   EXPECT(kTokenIdentifier);
   EXPECT(':');
@@ -719,6 +726,15 @@ CheckedError Parser::ParseField(StructDef &struct_def) {
     LookupCreateStruct(nested->constant);
   }
 
+  if (field->attributes.Lookup("flexbuffer")) {
+    field->flexbuffer = true;
+    uses_flexbuffers_ = true;
+    if (field->value.type.base_type != BASE_TYPE_VECTOR ||
+        field->value.type.element != BASE_TYPE_UCHAR)
+      return Error(
+            "flexbuffer attribute may only apply to a vector of ubyte");
+  }
+
   if (typefield) {
     // If this field is a union, and it has a manually assigned id,
     // the automatically added type field should have an id as well (of N - 1).
@@ -733,6 +749,18 @@ CheckedError Parser::ParseField(StructDef &struct_def) {
   }
 
   EXPECT(';');
+  return NoError();
+}
+
+CheckedError Parser::ParseString(Value &val) {
+  auto s = attribute_;
+  EXPECT(kTokenStringConstant);
+  val.constant = NumToString(builder_.CreateString(s).o);
+  return NoError();
+}
+
+CheckedError Parser::ParseComma() {
+  if (!opts.protobuf_ascii_alike) EXPECT(',');
   return NoError();
 }
 
@@ -764,7 +792,7 @@ CheckedError Parser::ParseAnyValue(Value &val, FieldDef *field,
         // Remember where we are in the source file, so we can come back here.
         auto backup = *static_cast<ParserState *>(this);
         ECHECK(SkipAnyJsonValue());  // The table.
-        EXPECT(',');
+        ECHECK(ParseComma());
         auto next_name = attribute_;
         if (Is(kTokenStringConstant)) {
           NEXT();
@@ -785,20 +813,30 @@ CheckedError Parser::ParseAnyValue(Value &val, FieldDef *field,
       ECHECK(atot(constant.c_str(), *this, &enum_idx));
       auto enum_val = val.type.enum_def->ReverseLookup(enum_idx);
       if (!enum_val) return Error("illegal type id for: " + field->name);
-      ECHECK(ParseTable(*enum_val->struct_def, &val.constant, nullptr));
+      if (enum_val->union_type.base_type == BASE_TYPE_STRUCT) {
+        ECHECK(ParseTable(*enum_val->union_type.struct_def, &val.constant,
+                          nullptr));
+        if (enum_val->union_type.struct_def->fixed) {
+          // All BASE_TYPE_UNION values are offsets, so turn this into one.
+          SerializeStruct(*enum_val->union_type.struct_def, val);
+          builder_.ClearOffsets();
+          val.constant = NumToString(builder_.GetSize());
+        }
+      } else if (enum_val->union_type.base_type == BASE_TYPE_STRING) {
+        ECHECK(ParseString(val));
+      } else {
+        assert(false);
+      }
       break;
     }
     case BASE_TYPE_STRUCT:
       ECHECK(ParseTable(*val.type.struct_def, &val.constant, nullptr));
       break;
     case BASE_TYPE_STRING: {
-      auto s = attribute_;
-      EXPECT(kTokenStringConstant);
-      val.constant = NumToString(builder_.CreateString(s).o);
+      ECHECK(ParseString(val));
       break;
     }
     case BASE_TYPE_VECTOR: {
-      EXPECT('[');
       uoffset_t off;
       ECHECK(ParseVector(val.type.VectorType(), &off));
       val.constant = NumToString(off);
@@ -831,33 +869,78 @@ void Parser::SerializeStruct(const StructDef &struct_def, const Value &val) {
   builder_.AddStructOffset(val.offset, builder_.GetSize());
 }
 
+CheckedError Parser::ParseTableDelimiters(size_t &fieldn,
+                                          const StructDef *struct_def,
+    const std::function<CheckedError(const std::string &name)> &body) {
+  // We allow tables both as JSON object{ .. } with field names
+  // or vector[..] with all fields in order
+  char terminator = '}';
+  bool is_nested_vector = struct_def && Is('[');
+  if (is_nested_vector) {
+    NEXT();
+    terminator = ']';
+  } else {
+    EXPECT('{');
+  }
+  for (;;) {
+    if ((!opts.strict_json || !fieldn) && Is(terminator)) break;
+    std::string name;
+    if (is_nested_vector) {
+      if (fieldn > struct_def->fields.vec.size()) {
+        return Error("too many unnamed fields in nested array");
+      }
+      name = struct_def->fields.vec[fieldn]->name;
+    } else {
+      name = attribute_;
+      if (Is(kTokenStringConstant)) {
+        NEXT();
+      } else {
+        EXPECT(opts.strict_json ? kTokenStringConstant : kTokenIdentifier);
+      }
+      if (!opts.protobuf_ascii_alike || !(Is('{') || Is('['))) EXPECT(':');
+    }
+    ECHECK(body(name));
+    if (Is(terminator)) break;
+    ECHECK(ParseComma());
+  }
+  NEXT();
+  if (is_nested_vector && fieldn != struct_def->fields.vec.size()) {
+    return Error("wrong number of unnamed fields in table vector");
+  }
+  return NoError();
+}
+
 CheckedError Parser::ParseTable(const StructDef &struct_def, std::string *value,
                                 uoffset_t *ovalue) {
-  EXPECT('{');
   size_t fieldn = 0;
-  for (;;) {
-    if ((!opts.strict_json || !fieldn) && Is('}')) { NEXT(); break; }
-    std::string name = attribute_;
-    if (Is(kTokenStringConstant)) {
-      NEXT();
-    } else {
-      EXPECT(opts.strict_json ? kTokenStringConstant : kTokenIdentifier);
+  auto err = ParseTableDelimiters(fieldn, &struct_def,
+                                  [&](const std::string &name) -> CheckedError {
+    if (name == "$schema") {
+      EXPECT(kTokenStringConstant);
+      return NoError();
     }
     auto field = struct_def.fields.Lookup(name);
     if (!field) {
       if (!opts.skip_unexpected_fields_in_json) {
         return Error("unknown field: " + name);
       } else {
-        EXPECT(':');
         ECHECK(SkipAnyJsonValue());
       }
     } else {
-      EXPECT(':');
       if (Is(kTokenNull)) {
         NEXT(); // Ignore this field.
       } else {
         Value val = field->value;
-        ECHECK(ParseAnyValue(val, field, fieldn, &struct_def));
+        if (field->flexbuffer) {
+          flexbuffers::Builder builder(1024,
+                                       flexbuffers::BUILDER_FLAG_SHARE_ALL);
+          ECHECK(ParseFlexBufferValue(&builder));
+          builder.Finish();
+          auto off = builder_.CreateVector(builder.GetBuffer());
+          val.constant = NumToString(off.o);
+        } else {
+          ECHECK(ParseAnyValue(val, field, fieldn, &struct_def));
+        }
         // Hardcoded insertion-sort with error-check.
         // If fields are specified in order, then this loop exits immediately.
         auto elem = field_stack_.rbegin();
@@ -873,8 +956,31 @@ CheckedError Parser::ParseTable(const StructDef &struct_def, std::string *value,
         fieldn++;
       }
     }
-    if (Is('}')) { NEXT(); break; }
-    EXPECT(',');
+    return NoError();
+  });
+  ECHECK(err);
+
+  // Check if all required fields are parsed.
+  for (auto field_it = struct_def.fields.vec.begin();
+            field_it != struct_def.fields.vec.end();
+            ++field_it) {
+    auto required_field = *field_it;
+    if (!required_field->required) {
+      continue;
+    }
+    bool found = false;
+    for (auto pf_it = field_stack_.end() - fieldn;
+         pf_it != field_stack_.end();
+         ++pf_it) {
+      auto parsed_field = pf_it->second;
+      if (parsed_field == required_field) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      return Error("required field is missing: " + required_field->name + " in " + struct_def.name);
+    }
   }
 
   if (struct_def.fixed && fieldn != struct_def.fields.vec.size())
@@ -952,22 +1058,34 @@ CheckedError Parser::ParseTable(const StructDef &struct_def, std::string *value,
   return NoError();
 }
 
-CheckedError Parser::ParseVector(const Type &type, uoffset_t *ovalue) {
-  int count = 0;
+CheckedError Parser::ParseVectorDelimiters(size_t &count,
+                                    const std::function<CheckedError()> &body) {
+  EXPECT('[');
   for (;;) {
-    if ((!opts.strict_json || !count) && Is(']')) { NEXT(); break; }
+    if ((!opts.strict_json || !count) && Is(']')) break;
+    ECHECK(body());
+    count++;
+    if (Is(']')) break;
+    ECHECK(ParseComma());
+  }
+  NEXT();
+  return NoError();
+}
+
+CheckedError Parser::ParseVector(const Type &type, uoffset_t *ovalue) {
+  size_t count = 0;
+  auto err = ParseVectorDelimiters(count, [&]() -> CheckedError {
     Value val;
     val.type = type;
     ECHECK(ParseAnyValue(val, nullptr, 0, nullptr));
     field_stack_.push_back(std::make_pair(val, nullptr));
-    count++;
-    if (Is(']')) { NEXT(); break; }
-    EXPECT(',');
-  }
+    return NoError();
+  });
+  ECHECK(err);
 
   builder_.StartVector(count * InlineSize(type) / InlineAlignment(type),
                        InlineAlignment(type));
-  for (int i = 0; i < count; i++) {
+  for (size_t i = 0; i < count; i++) {
     // start at the back, since we're building the data backwards.
     auto &val = field_stack_.back().first;
     switch (val.type.base_type) {
@@ -1078,14 +1196,24 @@ CheckedError Parser::ParseHash(Value &e, FieldDef* field) {
   assert(field);
   Value *hash_name = field->attributes.Lookup("hash");
   switch (e.type.base_type) {
-    case BASE_TYPE_INT:
+    case BASE_TYPE_INT: {
+      auto hash = FindHashFunction32(hash_name->constant.c_str());
+      int32_t hashed_value = static_cast<int32_t>(hash(attribute_.c_str()));
+      e.constant = NumToString(hashed_value);
+      break;
+    }
     case BASE_TYPE_UINT: {
       auto hash = FindHashFunction32(hash_name->constant.c_str());
       uint32_t hashed_value = hash(attribute_.c_str());
       e.constant = NumToString(hashed_value);
       break;
     }
-    case BASE_TYPE_LONG:
+    case BASE_TYPE_LONG: {
+      auto hash = FindHashFunction64(hash_name->constant.c_str());
+      int64_t hashed_value = static_cast<int64_t>(hash(attribute_.c_str()));
+      e.constant = NumToString(hashed_value);
+      break;
+    }
     case BASE_TYPE_ULONG: {
       auto hash = FindHashFunction64(hash_name->constant.c_str());
       uint64_t hashed_value = hash(attribute_.c_str());
@@ -1097,6 +1225,11 @@ CheckedError Parser::ParseHash(Value &e, FieldDef* field) {
   }
   NEXT();
   return NoError();
+}
+
+CheckedError Parser::TokenError() {
+  return Error("cannot parse value starting with: " +
+               TokenToStringId(token_));
 }
 
 CheckedError Parser::ParseSingleValue(Value &e) {
@@ -1165,9 +1298,7 @@ CheckedError Parser::ParseSingleValue(Value &e) {
                          e,
                          BASE_TYPE_STRING,
                          &match));
-    if (!match)
-      return Error("cannot parse value starting with: " +
-                   TokenToStringId(token_));
+    if (!match) return TokenError();
   }
   return NoError();
 }
@@ -1291,7 +1422,16 @@ CheckedError Parser::ParseEnum(bool is_union, EnumDef **dest) {
         return Error("enum value already exists: " + value_name);
       ev.doc_comment = value_comment;
       if (is_union) {
-        ev.struct_def = LookupCreateStruct(full_name);
+        if (Is(':')) {
+          NEXT();
+          ECHECK(ParseType(ev.union_type));
+          if (ev.union_type.base_type != BASE_TYPE_STRUCT &&
+              ev.union_type.base_type != BASE_TYPE_STRING)
+            return Error("union value type may only be table/struct/string");
+          enum_def.uses_type_aliases = true;
+        } else {
+          ev.union_type = Type(BASE_TYPE_STRUCT, LookupCreateStruct(full_name));
+        }
       }
       if (Is('=')) {
         NEXT();
@@ -1300,6 +1440,10 @@ CheckedError Parser::ParseEnum(bool is_union, EnumDef **dest) {
         if (!opts.proto_mode && prevsize &&
             enum_def.vals.vec[prevsize - 1]->value >= ev.value)
           return Error("enum values must be specified in ascending order");
+      }
+      if (is_union) {
+        if (ev.value < 0 || ev.value >= 256)
+          return Error("union enum value must fit in a ubyte");
       }
       if (opts.proto_mode && Is('[')) {
         NEXT();
@@ -1336,7 +1480,7 @@ CheckedError Parser::StartStruct(const std::string &name, StructDef **dest) {
   struct_def.file = file_being_parsed_;
   // Move this struct to the back of the vector just in case it was predeclared,
   // to preserve declaration order.
-  *remove(structs_.vec.begin(), structs_.vec.end(), &struct_def) = &struct_def;
+  *std::remove(structs_.vec.begin(), structs_.vec.end(), &struct_def) = &struct_def;
   *dest = &struct_def;
   return NoError();
 }
@@ -1493,7 +1637,9 @@ void Parser::MarkGenerated() {
   }
   for (auto it = structs_.vec.begin();
            it != structs_.vec.end(); ++it) {
-    (*it)->generated = true;
+    if (!(*it)->predecl) {
+      (*it)->generated = true;
+    }
   }
   for (auto it = services_.vec.begin();
            it != services_.vec.end(); ++it) {
@@ -1781,14 +1927,21 @@ CheckedError Parser::ParseTypeFromProtoType(Type *type) {
 
 CheckedError Parser::SkipAnyJsonValue() {
   switch (token_) {
-    case '{':
-      ECHECK(SkipJsonObject());
-      break;
+    case '{': {
+      size_t fieldn = 0;
+      return ParseTableDelimiters(fieldn, nullptr,
+                                  [&](const std::string &) -> CheckedError {
+        ECHECK(SkipAnyJsonValue());
+        fieldn++;
+        return NoError();
+      });
+    }
+    case '[': {
+      size_t count = 0;
+      return ParseVectorDelimiters(count, [&]() { return SkipAnyJsonValue(); });
+    }
     case kTokenStringConstant:
-      ECHECK(SkipJsonString());
-      break;
-    case '[':
-      ECHECK(SkipJsonArray());
+      EXPECT(kTokenStringConstant);
       break;
     case kTokenIntegerConstant:
       EXPECT(kTokenIntegerConstant);
@@ -1797,84 +1950,130 @@ CheckedError Parser::SkipAnyJsonValue() {
       EXPECT(kTokenFloatConstant);
       break;
     default:
-      return Error(std::string("Unexpected token:") + std::string(1, static_cast<char>(token_)));
+      return TokenError();
   }
   return NoError();
 }
 
-CheckedError Parser::SkipJsonObject() {
-  EXPECT('{');
-  size_t fieldn = 0;
-
-  for (;;) {
-    if ((!opts.strict_json || !fieldn) && Is('}')) break;
-
-    if (!Is(kTokenStringConstant)) {
-      EXPECT(opts.strict_json ? kTokenStringConstant : kTokenIdentifier);
+CheckedError Parser::ParseFlexBufferValue(flexbuffers::Builder *builder) {
+  switch (token_) {
+    case '{': {
+      auto start = builder->StartMap();
+      size_t fieldn = 0;
+      auto err = ParseTableDelimiters(fieldn, nullptr,
+                                  [&](const std::string &name) -> CheckedError {
+        builder->Key(name);
+        ECHECK(ParseFlexBufferValue(builder));
+        fieldn++;
+        return NoError();
+      });
+      ECHECK(err);
+      builder->EndMap(start);
+      break;
     }
-    else {
-      NEXT();
+    case '[':{
+      auto start = builder->StartVector();
+      size_t count = 0;
+      ECHECK(ParseVectorDelimiters(count, [&]() {
+        return ParseFlexBufferValue(builder);
+      }));
+      builder->EndVector(start, false, false);
+      break;
     }
-
-    EXPECT(':');
-    ECHECK(SkipAnyJsonValue());
-    fieldn++;
-
-    if (Is('}')) break;
-    EXPECT(',');
+    case kTokenStringConstant:
+      builder->String(attribute_);
+      EXPECT(kTokenStringConstant);
+      break;
+    case kTokenIntegerConstant:
+      builder->Int(StringToInt(attribute_.c_str()));
+      EXPECT(kTokenIntegerConstant);
+      break;
+    case kTokenFloatConstant:
+      builder->Double(strtod(attribute_.c_str(), nullptr));
+      EXPECT(kTokenFloatConstant);
+      break;
+    default:
+      return TokenError();
   }
-
-  NEXT();
   return NoError();
 }
 
-CheckedError Parser::SkipJsonArray() {
-  EXPECT('[');
-
-  for (;;) {
-    if (Is(']')) break;
-
-    ECHECK(SkipAnyJsonValue());
-
-    if (Is(']')) break;
-    EXPECT(',');
-  }
-
-  NEXT();
-  return NoError();
-}
-
-CheckedError Parser::SkipJsonString() {
-  EXPECT(kTokenStringConstant);
-  return NoError();
+bool Parser::ParseFlexBuffer(const char *source, const char *source_filename,
+                             flexbuffers::Builder *builder) {
+  auto ok = !StartParseFile(source, source_filename).Check() &&
+            !ParseFlexBufferValue(builder).Check();
+  if (ok) builder->Finish();
+  return ok;
 }
 
 bool Parser::Parse(const char *source, const char **include_paths,
                    const char *source_filename) {
-  return !DoParse(source, include_paths, source_filename).Check();
+  return !ParseRoot(source, include_paths, source_filename).Check();
 }
 
-CheckedError Parser::DoParse(const char *source, const char **include_paths,
-                             const char *source_filename) {
+CheckedError Parser::StartParseFile(const char *source, const char *source_filename) {
   file_being_parsed_ = source_filename ? source_filename : "";
+  source_ = cursor_ = source;
+  line_ = 1;
+  error_.clear();
+  ECHECK(SkipByteOrderMark());
+  NEXT();
+  if (Is(kTokenEof))
+      return Error("input file is empty");
+  return NoError();
+}
+
+CheckedError Parser::ParseRoot(const char *source, const char **include_paths,
+                             const char *source_filename) {
+  ECHECK(DoParse(source, include_paths, source_filename, nullptr));
+
+  // Check that all types were defined.
+  for (auto it = structs_.vec.begin(); it != structs_.vec.end(); ++it) {
+    if ((*it)->predecl) {
+      return Error("type referenced but not defined: " + (*it)->name);
+    }
+  }
+
+  // This check has to happen here and not earlier, because only now do we
+  // know for sure what the type of these are.
+  for (auto it = enums_.vec.begin(); it != enums_.vec.end(); ++it) {
+    auto &enum_def = **it;
+    if (enum_def.is_union) {
+      for (auto val_it = enum_def.vals.vec.begin();
+           val_it != enum_def.vals.vec.end();
+           ++val_it) {
+        auto &val = **val_it;
+        if (opts.lang_to_generate != IDLOptions::kCpp &&
+            val.union_type.struct_def && val.union_type.struct_def->fixed)
+          return Error(
+                "only tables can be union elements in the generated language: "
+                + val.name);
+      }
+    }
+  }
+  return NoError();
+}
+
+CheckedError Parser::DoParse(const char *source,
+                                    const char **include_paths,
+                                    const char *source_filename,
+                                    const char *include_filename) {
   if (source_filename &&
       included_files_.find(source_filename) == included_files_.end()) {
-    included_files_[source_filename] = true;
+    included_files_[source_filename] = include_filename ? include_filename : "";
     files_included_per_file_[source_filename] = std::set<std::string>();
   }
   if (!include_paths) {
     static const char *current_directory[] = { "", nullptr };
     include_paths = current_directory;
   }
-  source_ = cursor_ = source;
-  line_ = 1;
-  error_.clear();
   field_stack_.clear();
   builder_.Clear();
   // Start with a blank namespace just in case this file doesn't have one.
   namespaces_.push_back(new Namespace());
-  ECHECK(SkipByteOrderMark());
-  NEXT();
+
+  ECHECK(StartParseFile(source, source_filename));
+
   // Includes must come before type declarations:
   for (;;) {
     // Parse pre-include proto statements if any:
@@ -1892,7 +2091,7 @@ CheckedError Parser::DoParse(const char *source, const char **include_paths,
                 Is(kTokenIdentifier))) {
       NEXT();
       if (opts.proto_mode && attribute_ == "public") NEXT();
-      auto name = attribute_;
+      auto name = flatbuffers::PosixPath(attribute_.c_str());
       EXPECT(kTokenStringConstant);
       // Look for the file in include_paths.
       std::string filepath;
@@ -1910,7 +2109,8 @@ CheckedError Parser::DoParse(const char *source, const char **include_paths,
         std::string contents;
         if (!LoadFile(filepath.c_str(), true, &contents))
           return Error("unable to load include file: " + name);
-        ECHECK(DoParse(contents.c_str(), include_paths, filepath.c_str()));
+        ECHECK(DoParse(contents.c_str(), include_paths, filepath.c_str(),
+                       name.c_str()));
         // We generally do not want to output code for any included files:
         if (!opts.generate_all) MarkGenerated();
         // This is the easiest way to continue this file after an include:
@@ -1920,7 +2120,7 @@ CheckedError Parser::DoParse(const char *source, const char **include_paths,
         // entered into included_files_.
         // This is recursive, but only go as deep as the number of include
         // statements.
-        return DoParse(source, include_paths, source_filename);
+        return DoParse(source, include_paths, source_filename, include_filename);
       }
       EXPECT(';');
     } else {
@@ -1984,23 +2184,6 @@ CheckedError Parser::DoParse(const char *source, const char **include_paths,
       ECHECK(ParseService());
     } else {
       ECHECK(ParseDecl());
-    }
-  }
-  for (auto it = structs_.vec.begin(); it != structs_.vec.end(); ++it) {
-    if ((*it)->predecl) {
-      return Error("type referenced but not defined: " + (*it)->name);
-    }
-  }
-  for (auto it = enums_.vec.begin(); it != enums_.vec.end(); ++it) {
-    auto &enum_def = **it;
-    if (enum_def.is_union) {
-      for (auto val_it = enum_def.vals.vec.begin();
-           val_it != enum_def.vals.vec.end();
-           ++val_it) {
-        auto &val = **val_it;
-        if (val.struct_def && val.struct_def->fixed)
-          return Error("only tables can be union elements: " + val.name);
-      }
     }
   }
   return NoError();
@@ -2142,9 +2325,11 @@ Offset<reflection::EnumVal> EnumVal::Serialize(FlatBufferBuilder *builder) const
   return reflection::CreateEnumVal(*builder,
                                    builder->CreateString(name),
                                    value,
-                                   struct_def
-                                     ? struct_def->serialized_location
-                                     : 0);
+                                   union_type.struct_def
+                                     ? union_type.struct_def->
+                                         serialized_location
+                                     : 0,
+                                   union_type.Serialize(builder));
 }
 
 Offset<reflection::Type> Type::Serialize(FlatBufferBuilder *builder) const {
